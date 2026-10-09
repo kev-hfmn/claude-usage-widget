@@ -376,314 +376,226 @@ function getBackgroundColor(percent, isSession, warnThreshold, dangerThreshold) 
   }
 }
 
-/**
- * Bold 8x11 bitmap font for numbers 0-9 (2-pixel strokes for bold look)
- * Each number is represented as an array of 11 rows, each row is 8 bits
- */
-const BITMAP_FONT = {
-  '0': [
-    0b00111100,
-    0b01111110,
-    0b11100111,
-    0b11000011,
-    0b11000011,
-    0b11000011,
-    0b11000011,
-    0b11000011,
-    0b11100111,
-    0b01111110,
-    0b00111100
-  ],
-  '1': [
-    0b00011000,
-    0b00111000,
-    0b01111000,
-    0b00011000,
-    0b00011000,
-    0b00011000,
-    0b00011000,
-    0b00011000,
-    0b00011000,
-    0b01111110,
-    0b01111110
-  ],
-  '2': [
-    0b00111100,
-    0b01111110,
-    0b11100111,
-    0b00000011,
-    0b00000110,
-    0b00011100,
-    0b00111000,
-    0b01110000,
-    0b11100000,
-    0b11111111,
-    0b11111111
-  ],
-  '3': [
-    0b00111100,
-    0b01111110,
-    0b11100111,
-    0b00000011,
-    0b00000110,
-    0b00111100,
-    0b00000110,
-    0b00000011,
-    0b11100111,
-    0b01111110,
-    0b00111100
-  ],
-  '4': [
-    0b00000110,
-    0b00001110,
-    0b00011110,
-    0b00110110,
-    0b01100110,
-    0b11111111,
-    0b11111111,
-    0b00000110,
-    0b00000110,
-    0b00000110,
-    0b00000110
-  ],
-  '5': [
-    0b11111111,
-    0b11111111,
-    0b11000000,
-    0b11000000,
-    0b11111100,
-    0b00000110,
-    0b00000011,
-    0b00000011,
-    0b11100111,
-    0b01111110,
-    0b00111100
-  ],
-  '6': [
-    0b00111100,
-    0b01111110,
-    0b11100000,
-    0b11000000,
-    0b11111100,
-    0b11100110,
-    0b11000011,
-    0b11000011,
-    0b11100111,
-    0b01111110,
-    0b00111100
-  ],
-  '7': [
-    0b11111111,
-    0b11111111,
-    0b00000011,
-    0b00000110,
-    0b00001100,
-    0b00011000,
-    0b00110000,
-    0b00110000,
-    0b01100000,
-    0b01100000,
-    0b01100000
-  ],
-  '8': [
-    0b00111100,
-    0b01111110,
-    0b11100111,
-    0b11000011,
-    0b01111110,
-    0b00111100,
-    0b01111110,
-    0b11000011,
-    0b11100111,
-    0b01111110,
-    0b00111100
-  ],
-  '9': [
-    0b00111100,
-    0b01111110,
-    0b11100111,
-    0b11000011,
-    0b11000011,
-    0b01111111,
-    0b00111111,
-    0b00000011,
-    0b00000111,
-    0b01111110,
-    0b00111100
-  ]
+// Tray images are rendered on a <canvas> in a hidden BrowserWindow: that gives
+// real system-font text and anti-aliased arcs for free, then tagged with
+// scaleFactor: 2 so macOS shows them crisply on Retina displays.
+const TRAY_ICON_SCALE = 2;
+const TRAY_IDLE_COLOR = { r: 120, g: 120, b: 128 };
+let trayCanvasWin = null;
+
+function lerpColor(colorA, colorB, t) {
+  return {
+    r: Math.round(colorA.r + (colorB.r - colorA.r) * t),
+    g: Math.round(colorA.g + (colorB.g - colorA.g) * t),
+    b: Math.round(colorA.b + (colorB.b - colorA.b) * t),
+  };
+}
+
+// Walks a multi-stop gradient (stops sorted by `at`, 0-100) and returns the
+// interpolated color at the given percent.
+function colorAtStops(stops, percent) {
+  const p = Math.max(0, Math.min(100, percent));
+  for (let i = 0; i < stops.length - 1; i++) {
+    const from = stops[i];
+    const to = stops[i + 1];
+    if (p <= to.at) {
+      return lerpColor(from.color, to.color, (p - from.at) / (to.at - from.at));
+    }
+  }
+  return stops[stops.length - 1].color;
+}
+
+// Session ring: bright yellow -> dark yellow -> orange -> red as usage climbs.
+const SESSION_RING_STOPS = [
+  { at: 0, color: { r: 253, g: 224, b: 71 } },  // #fde047
+  { at: 40, color: { r: 202, g: 138, b: 4 } },  // #ca8a04
+  { at: 70, color: { r: 249, g: 115, b: 22 } }, // #f97316
+  { at: 100, color: { r: 239, g: 68, b: 68 } }, // #ef4444
+];
+
+// Weekly ring: light blue -> dark blue as usage climbs.
+const WEEKLY_RING_STOPS = [
+  { at: 0, color: { r: 147, g: 197, b: 253 } },  // #93c5fd
+  { at: 100, color: { r: 30, g: 58, b: 138 } },  // #1e3a8a
+];
+
+// Fable ring: light -> dark fuchsia, matching the widget's Fable bar.
+const FABLE_RING_STOPS = [
+  { at: 0, color: { r: 240, g: 171, b: 252 } },  // #f0abfc
+  { at: 100, color: { r: 162, g: 28, b: 175 } }, // #a21caf
+];
+
+// Usage-ring tray arcs: one fixed color per limit, [dark menu bar, light menu bar].
+const TRAY_TEXT_COLORS = {
+  session: [{ r: 253, g: 224, b: 71 }, { r: 161, g: 98, b: 7 }],    // #fde047 / #a16207
+  weekly: [{ r: 147, g: 197, b: 253 }, { r: 29, g: 78, b: 216 }],   // #93c5fd / #1d4ed8
+  fable: [{ r: 240, g: 171, b: 252 }, { r: 162, g: 28, b: 175 }],   // #f0abfc / #a21caf
 };
 
 /**
- * Narrow 6x11 bitmap font for 3-digit numbers (100%)
- * Bold version to match
+ * Draws the tray image. Runs INSIDE the hidden canvas window (serialized via
+ * toString + executeJavaScript), so it must be self-contained: no closures
+ * over main-process state, plain JSON in, data URL out.
+ *
+ * Each row is a pie clock: the wedge is how much of the window has ELAPSED
+ * (empty = just reset, full = about to reset), matching the widget's elapsed
+ * circles. The wedge color tracks usage % along the bright -> danger
+ * gradient; the optional text carries the exact number. No backdrop: text and
+ * outlines are white or black to match the menu bar's appearance (spec.dark).
+ *
+ * @param {{scale:number, stacked:boolean, rows:Array<{kind:'ring'|'dot'|'noentry'|'text', color:{r,g,b}, elapsed:number|null, text:string|null, textColor?:{r,g,b}, extra?:object}>}} spec
+ *   stacked: rows share one badge, one above the other (macOS single tray item)
+ *   otherwise: a single square 20pt badge (Windows/Linux, one tray per stat)
  */
-const BITMAP_FONT_NARROW = {
-  '0': [
-    0b011110,
-    0b111111,
-    0b110011,
-    0b110011,
-    0b110011,
-    0b110011,
-    0b110011,
-    0b110011,
-    0b110011,
-    0b111111,
-    0b011110
-  ],
-  '1': [
-    0b001100,
-    0b011100,
-    0b111100,
-    0b001100,
-    0b001100,
-    0b001100,
-    0b001100,
-    0b001100,
-    0b001100,
-    0b111111,
-    0b111111
-  ]
-};
+function drawTrayImage(spec) {
+  const { scale, stacked, rows } = spec;
+  const ROW = stacked ? 11 : 20;   // pt per row; 22pt total is the macOS menu bar limit
+  const RING = stacked ? 10 : 16;  // ring diameter
+  const PAD = stacked ? 3 : 2;
+  const GAP = 3;                   // ring -> text
+  const FONT = `600 ${stacked ? 9.5 : 11}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  const rgb = (c) => `rgb(${c.r},${c.g},${c.b})`;
 
-/**
- * Draw a crisp bitmap character at position (x, y) in the buffer
- */
-function drawChar(buffer, width, height, char, x, y, color, useNarrow = false) {
-  const bitmap = useNarrow ? BITMAP_FONT_NARROW[char] : BITMAP_FONT[char];
-  if (!bitmap) return useNarrow ? 6 : 8;
-  
-  const charWidth = useNarrow ? 6 : 8;
-  const charHeight = 11;
-  const maxCol = useNarrow ? 5 : 7;
-  
-  for (let row = 0; row < charHeight; row++) {
-    for (let col = 0; col < charWidth; col++) {
-      if (bitmap[row] & (1 << (maxCol - col))) {
-        const px = x + col;
-        const py = y + row;
-        if (px >= 0 && px < width && py >= 0 && py < height) {
-          const offset = (py * width + px) * 4;
-          buffer[offset] = color.b;
-          buffer[offset + 1] = color.g;
-          buffer[offset + 2] = color.r;
-          buffer[offset + 3] = color.a;
-        }
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.font = FONT;
+  const hasText = rows.some((r) => r.text);
+  // ringScale < 1 shrinks the pie (and its slot) away for the click-to-countdown flip.
+  const ringScale = Math.max(...rows.map((r) => r.ringScale ?? 1));
+  const ringW = RING * ringScale;
+  // Never narrower than "88%" so the badge doesn't jitter as digits change.
+  const textWidth = (t) => Math.max(ctx.measureText('88%').width, ctx.measureText(t).width);
+  const textW = hasText ? Math.max(...rows.map((r) => textWidth(r.text || ''))) : 0;
+  const mainW = ringW + (hasText ? GAP * ringScale + textW : 0);
+  // Optional trailing cell on a row (Fable after Weekly), SEP pt after the main column.
+  const SEP = 5;
+  const shapeW = (r) => (r.kind === 'text' ? 0 : ringW + GAP * ringScale); // 'text' cells: no shape slot
+  const extraW = (r) => (r.extra ? SEP + shapeW(r.extra) + (r.extra.text ? textWidth(r.extra.text) : 0) : 0);
+  const W = Math.ceil(PAD + mainW + Math.max(...rows.map(extraW)) + PAD);
+  const H = ROW * rows.length;
+  canvas.width = W * scale;
+  canvas.height = H * scale;
+  ctx.scale(scale, scale);
+  ctx.font = FONT; // resizing the canvas resets state
+  ctx.textBaseline = 'middle';
+
+  rows.forEach((row, i) => {
+    const cy = ROW * i + ROW / 2;
+    drawCell(row, PAD, cy);
+    if (row.extra) drawCell(row.extra, PAD + mainW + SEP, cy);
+  });
+
+  function drawCell(row, x, cy) {
+    const cx = x + ringW / 2;
+    const r = ringW / 2;
+    const color = row.color && rgb(row.color);
+    ctx.lineCap = 'butt';
+
+    if (row.kind === 'text') {
+      // Text only, no shape.
+    } else if (row.kind === 'gauge') {
+      // Thin usage ring: faint full track, colored arc clockwise from 12 o'clock.
+      // Round caps keep even 1% visible as a dot.
+      const lw = 1.8, rr = r - lw / 2;
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = spec.dark ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.18)';
+      ctx.beginPath(); ctx.arc(cx, cy, rr, 0, Math.PI * 2); ctx.stroke();
+      const fill = Math.max(0, Math.min(1, row.fill || 0));
+      if (fill > 0) {
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = color;
+        ctx.beginPath(); ctx.arc(cx, cy, rr, -Math.PI / 2, -Math.PI / 2 + Math.max(0.01, fill) * Math.PI * 2); ctx.stroke();
       }
+    } else if (row.kind === 'noentry') {
+      ctx.fillStyle = 'rgb(220,53,69)';
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(cx - r * 0.6, cy - r * 0.18, r * 1.2, r * 0.36);
+    } else if (row.kind === 'dot') {
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(cx, cy, r * 0.65, 0, Math.PI * 2); ctx.fill();
+    } else {
+      // Filled pie on a dim disc: at 10pt a stroked arc with a hand was mush,
+      // a wedge is readable at a glance and its leading edge IS the hand.
+      const rr = Math.max(0, r - 0.5);
+      ctx.fillStyle = spec.dark ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.1)';
+      ctx.beginPath(); ctx.arc(cx, cy, rr, 0, Math.PI * 2); ctx.fill();
+      if (row.elapsed !== null && row.elapsed !== undefined) {
+        // Sweeps clockwise from 12 o'clock.
+        const sweep = Math.max(0, Math.min(1, row.elapsed)) * Math.PI * 2;
+        const start = -Math.PI / 2;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, rr, start, start + sweep);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = spec.dark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.35)';
+      ctx.beginPath(); ctx.arc(cx, cy, rr, 0, Math.PI * 2); ctx.stroke();
+    }
+
+    if (row.text) {
+      ctx.fillStyle = row.textColor ? rgb(row.textColor) : spec.dark ? '#fff' : '#000';
+      ctx.fillText(row.text, x + shapeW(row), cy + 0.5);
     }
   }
-  return charWidth;
+
+  return canvas.toDataURL('image/png');
 }
 
-/**
- * Generate a single percentage badge icon with colored background and bitmap text
- * @param {number} percent - Usage percentage (0-100)
- * @param {object} bgColor - Background color {r, g, b}
- * @returns {NativeImage} Generated tray icon
- */
-function generatePercentageIcon(percent, bgColor) {
-  const width = 20;  // Back to 20x20
-  const height = 20;
-  const buffer = Buffer.alloc(width * height * 4);
-  
-  // Draw filled square background
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const offset = (y * width + x) * 4;
-      buffer[offset] = bgColor.b;
-      buffer[offset + 1] = bgColor.g;
-      buffer[offset + 2] = bgColor.r;
-      buffer[offset + 3] = 255;
-    }
+async function renderTrayImage(rows, stacked) {
+  if (!trayCanvasWin || trayCanvasWin.isDestroyed()) {
+    trayCanvasWin = new BrowserWindow({
+      show: false, width: 200, height: 60,
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    });
+    await trayCanvasWin.loadURL('about:blank');
   }
-  
-  // Draw white text
-  const percentText = Math.round(percent).toString();
-  const textColor = { r: 255, g: 255, b: 255, a: 255 };
-  
-  // Use narrow font for 3-digit numbers (100%)
-  const useNarrow = percentText.length >= 3;
-  const charWidth = useNarrow ? 6 : 8;
-  const charHeight = 11;
-  const gap = percentText.length >= 3 ? 0 : 1; // 1px gap for 1-2 digits, no gap for 100
-  const totalWidth = percentText.length * charWidth + (percentText.length - 1) * gap;
-  let startX = Math.floor((width - totalWidth) / 2);
-  const startY = Math.floor((height - charHeight) / 2);
-  
-  // Draw each digit
-  for (let i = 0; i < percentText.length; i++) {
-    drawChar(buffer, width, height, percentText[i], startX, startY, textColor, useNarrow);
-    startX += charWidth + gap;
-  }
-  
-  return nativeImage.createFromBuffer(buffer, { width, height });
+  // Always white text/outlines: the macOS menu bar tints with the wallpaper, not the system theme, so shouldUseDarkColors guesses wrong.
+  const spec = JSON.stringify({ scale: TRAY_ICON_SCALE, stacked, rows, dark: true });
+  const dataUrl = await trayCanvasWin.webContents.executeJavaScript(`(${drawTrayImage.toString()})(${spec})`);
+  const png = Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64');
+  return nativeImage.createFromBuffer(png, { scaleFactor: TRAY_ICON_SCALE });
 }
 
+
 /**
- * Generate a Red X icon for 99-100% usage (maxed out)
- * @returns {NativeImage} Generated red X tray icon
+ * Format remaining time until reset for tray display, e.g. "2h 14m", "3d 4h", "45m".
+ * Mirrors the widget's own countdown formatting in src/renderer/app.js (updateTimer)
+ * so the tray and the widget window never disagree.
  */
-function generateRedXIcon() {
-  const width = 20;
-  const height = 20;
-  const buffer = Buffer.alloc(width * height * 4);
-  
-  // Red background
-  const red = { r: 220, g: 53, b: 69 }; // #dc3545
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const offset = (y * width + x) * 4;
-      buffer[offset] = red.b;
-      buffer[offset + 1] = red.g;
-      buffer[offset + 2] = red.r;
-      buffer[offset + 3] = 255;
-    }
+// Click-to-flip on the stacked macOS item: 0 = pies + percent, 1 = countdown
+// text only. Each click animates to the other side in a few frames and stays.
+let trayFlip = 0;
+let trayFlipTarget = 0;
+let trayFlipRun = 0;
+
+async function toggleTrayFlip() {
+  const run = ++trayFlipRun; // a newer click supersedes this animation
+  trayFlipTarget = trayFlipTarget ? 0 : 1;
+  const from = trayFlip;
+  for (let f = 1; f <= 6; f++) {
+    if (run !== trayFlipRun) return;
+    trayFlip = from + (trayFlipTarget - from) * (f / 6);
+    const data = store.get('latestUsageData');
+    if (data) await updateTrayIcon(data);
+    await new Promise((r) => setTimeout(r, 30));
   }
-  
-  // Draw white X (2 pixel thick lines)
-  const white = { r: 255, g: 255, b: 255, a: 255 };
-  
-  // Diagonal line from top-left to bottom-right
-  for (let i = 0; i < 11; i++) {
-    const x1 = 5 + i;
-    const y1 = 5 + i;
-    // Draw 2x2 pixel for thickness
-    for (let dy = 0; dy < 2; dy++) {
-      for (let dx = 0; dx < 2; dx++) {
-        const px = x1 + dx;
-        const py = y1 + dy;
-        if (px < width && py < height) {
-          const offset = (py * width + px) * 4;
-          buffer[offset] = white.b;
-          buffer[offset + 1] = white.g;
-          buffer[offset + 2] = white.r;
-          buffer[offset + 3] = white.a;
-        }
-      }
-    }
+}
+
+function formatElapsedCountdown(diffMs) {
+  if (diffMs <= 0) return 'resetting…';
+  const hours = Math.floor(diffMs / (1000 * 60 * 60));
+  const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+  if (hours >= 24) {
+    const days = Math.floor(hours / 24);
+    return `${days}d ${hours % 24}h`;
+  } else if (hours > 0) {
+    return `${hours}h ${minutes}m`;
   }
-  
-  // Diagonal line from top-right to bottom-left
-  for (let i = 0; i < 11; i++) {
-    const x1 = 15 - i;
-    const y1 = 5 + i;
-    // Draw 2x2 pixel for thickness
-    for (let dy = 0; dy < 2; dy++) {
-      for (let dx = 0; dx < 2; dx++) {
-        const px = x1 + dx;
-        const py = y1 + dy;
-        if (px < width && py < height) {
-          const offset = (py * width + px) * 4;
-          buffer[offset] = white.b;
-          buffer[offset + 1] = white.g;
-          buffer[offset + 2] = white.r;
-          buffer[offset + 3] = white.a;
-        }
-      }
-    }
-  }
-  
-  return nativeImage.createFromBuffer(buffer, { width, height });
+  return `${minutes}m`;
 }
 
 
@@ -696,22 +608,26 @@ function createTray() {
     return;
   }
 
-  // Rebuild from a clean state if only one of the two stats tray icons survived.
-  const hasSessionTray = sessionTray && !sessionTray.isDestroyed();
-  const hasWeeklyTray = weeklyTray && !weeklyTray.isDestroyed();
-  if (hasSessionTray && hasWeeklyTray) return;
-  if (hasSessionTray || hasWeeklyTray) destroyTrayIcons();
+  // macOS: ONE tray item showing both stats stacked (session over weekly), since
+  // each NSStatusItem carries its own fixed padding and two of them ate the
+  // menu bar. Elsewhere: one square icon per stat.
+  const wantTrays = process.platform === 'darwin' ? 1 : 2;
+  const alive = [sessionTray, weeklyTray].filter((t) => t && !t.isDestroyed()).length;
+  if (alive === wantTrays) return;
+  if (alive) destroyTrayIcons();
 
   try {
     const staticIconPath = path.join(__dirname, process.platform === 'darwin' ? 'assets/tray-icon-mac.png' : process.platform === 'linux' ? 'assets/tray-icon-linux.png' : 'assets/tray-icon.png');
-    
-    // Create Weekly tray icon FIRST (left position, blue)
-    weeklyTray = new Tray(staticIconPath);
-    weeklyTray.setToolTip('Weekly Usage');
-    
-    // Create Session tray icon SECOND (right position, purple)
+
+    if (wantTrays === 2) {
+      // Weekly tray icon FIRST (left position, blue)
+      weeklyTray = new Tray(staticIconPath);
+      weeklyTray.setToolTip('Weekly Usage');
+    }
+
+    // Session tray icon SECOND (right position, yellow/red); the only one on macOS.
     sessionTray = new Tray(staticIconPath);
-    sessionTray.setToolTip('Session Usage');
+    sessionTray.setToolTip(wantTrays === 2 ? 'Session Usage' : 'Claude Usage');
 
     const contextMenu = Menu.buildFromTemplate([
       {
@@ -757,25 +673,28 @@ function createTray() {
       }
     ]);
 
-    sessionTray.setContextMenu(contextMenu);
-    weeklyTray.setContextMenu(contextMenu);
-
-    // Click handlers - swapped order
-        weeklyTray.on('click', () => {
-      if (isMainWindowShownOnScreen()) {
-        mainWindow.hide();
-      } else {
-        showMainWindowSmart();
+    for (const tray of [sessionTray, weeklyTray]) {
+      if (!tray) continue;
+      // macOS: an attached context menu swallows left-clicks (no 'click' event),
+      // so pop it on right-click only. Left-click there toggles pies <-> countdown
+      // and refreshes; the widget opens via the menu's "Show Widget".
+      if (process.platform === 'darwin') {
+        tray.on('right-click', () => tray.popUpContextMenu(contextMenu));
+        tray.on('click', () => {
+          toggleTrayFlip();
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('refresh-usage');
+        });
+        continue;
       }
-    });
-    
-        sessionTray.on('click', () => {
-      if (isMainWindowShownOnScreen()) {
-        mainWindow.hide();
-      } else {
-        showMainWindowSmart();
-      }
-    });
+      tray.setContextMenu(contextMenu);
+      tray.on('click', () => {
+        if (isMainWindowShownOnScreen()) {
+          mainWindow.hide();
+        } else {
+          showMainWindowSmart();
+        }
+      });
+    }
   } catch (error) {
     console.error('Failed to create tray:', error);
   }
@@ -786,6 +705,8 @@ function destroyTrayIcons() {
   const trays = [sessionTray, weeklyTray];
   sessionTray = null;
   weeklyTray = null;
+  if (trayCanvasWin && !trayCanvasWin.isDestroyed()) trayCanvasWin.destroy();
+  trayCanvasWin = null;
 
   for (const tray of trays) {
     if (!tray || tray.isDestroyed()) continue;
@@ -849,37 +770,23 @@ function formatResetTime(resetsAt, timeFormat, includeDate = false) {
  * Update tray icons with current usage data
  * @param {Object} usageData - Usage data object containing session and weekly percentages
  */
-function updateTrayIcon(usageData) {
+async function updateTrayIcon(usageData) {
   const showTrayStats = store.get('settings.showTrayStats', false);
-  
-  if (!showTrayStats) {
-    // Destroy only weeklyTray, keeping sessionTray alive as a persistent restore
-    // icon. Without it, hide() on Windows leaves no way to restore the window.
-    // Apply the same Linux appindicator cleanup that destroyTrayIcons() uses.
-    if (weeklyTray && !weeklyTray.isDestroyed()) {
-      try {
-        weeklyTray.removeAllListeners();
-        weeklyTray.setContextMenu(null);
-        weeklyTray.setToolTip('');
-        if (process.platform === 'linux') weeklyTray.setImage(nativeImage.createEmpty());
-        weeklyTray.destroy();
-      } catch (_) {}
-      weeklyTray = null;
-    }
-    return;
-  }
 
-  // Recreate tray icons if they were destroyed
-  if (!sessionTray || sessionTray.isDestroyed() || !weeklyTray || weeklyTray.isDestroyed()) {
-    createTray();
-  }
+  if (!showTrayStats) return; // tray existence is owned by createTray()/destroyTrayIcons()
 
-  if ((!sessionTray || sessionTray.isDestroyed()) && (!weeklyTray || weeklyTray.isDestroyed())) return;
+  createTray(); // no-op when the expected tray items are already alive
+  if (!hasTrayIcon()) return;
 
   // Get threshold settings and time format
   const warnThreshold = store.get('settings.warnThreshold', 75);
   const dangerThreshold = store.get('settings.dangerThreshold', 90);
   const timeFormat = store.get('settings.timeFormat', '12h');
+  // 'ring': usage ring only. 'text': flat status dot + text (percent +
+  // countdown). 'both': usage ring + percent. Text only fits on macOS, where
+  // the single stacked item is wide; Windows/Linux tray slots are square.
+  const displayMode = store.get('settings.trayDisplayMode', 'both');
+  const stacked = process.platform === 'darwin';
 
   // Extract percentages and reset times from usage data
   const sessionPercent = usageData?.five_hour?.utilization || 0;
@@ -887,41 +794,124 @@ function updateTrayIcon(usageData) {
   const weeklyPercent = usageData?.seven_day?.utilization || 0;
   const weeklyResetsAt = usageData?.seven_day?.resets_at;
 
+  const now = Date.now();
+
+  // Time-remaining string for the countdown shown in 'text' mode and the
+  // tooltip, plus how much of the window has elapsed as a 0..1 fraction for
+  // the ring. null when there's no active window yet (resets_at absent).
+  function elapsedInfo(resetsAt, windowMs) {
+    if (!resetsAt) return null;
+    const diff = new Date(resetsAt).getTime() - now;
+    return {
+      remainingText: formatElapsedCountdown(diff),
+      elapsedFraction: Math.max(0, Math.min(1, 1 - diff / windowMs)),
+    };
+  }
+
+  const HOUR_MS = 60 * 60 * 1000;
+  const sessionElapsed = elapsedInfo(sessionResetsAt, 5 * HOUR_MS);
+  const weeklyElapsed = elapsedInfo(weeklyResetsAt, 7 * 24 * HOUR_MS);
+
+  // One drawTrayImage row for a stat. 99-100% (maxed out) shows a "no entry"
+  // sign regardless of mode: "you're capped" trumps "here's how much time is left".
+  function rowSpec(percent, elapsed, stops, isSession) {
+    const kind = percent >= 99 ? 'noentry' : displayMode === 'text' ? 'dot' : 'ring';
+    const color = kind === 'dot'
+      ? getBackgroundColor(percent, isSession, warnThreshold, dangerThreshold)
+      : elapsed ? colorAtStops(stops, percent) : TRAY_IDLE_COLOR;
+    const pct = `${Math.round(percent)}%`;
+    let text = null;
+    if (stacked && displayMode !== 'ring') {
+      text = displayMode === 'text' && elapsed ? `${pct} · ${elapsed.remainingText}` : pct;
+    }
+    // Mid-flip: the pie shrinks away and the countdown takes the text slot.
+    // 'text' mode already shows the countdown, so it doesn't flip.
+    let ringScale = 1;
+    if (stacked && trayFlip > 0 && kind !== 'dot') {
+      ringScale = 1 - trayFlip;
+      if (trayFlip >= 0.5) text = elapsed ? elapsed.remainingText : '—';
+    }
+    return { kind, color, elapsed: elapsed ? elapsed.elapsedFraction : null, text, ringScale };
+  }
+
+  function tooltip(label, percent, resetsAt, elapsed, isSession) {
+    let tip = `${label}: ${Math.round(percent)}%`;
+    const resetTime = formatResetTime(resetsAt, timeFormat, !isSession);
+    if (resetTime) tip += `\nResets: ${resetTime}`;
+    if (elapsed) tip += ` (in ${elapsed.remainingText})`;
+    return tip;
+  }
+
+  const sessionRow = rowSpec(sessionPercent, sessionElapsed, SESSION_RING_STOPS, true);
+  const weeklyRow = rowSpec(weeklyPercent, weeklyElapsed, WEEKLY_RING_STOPS, false);
+  const sessionTip = tooltip('Session', sessionPercent, sessionResetsAt, sessionElapsed, true);
+  let weeklyTip = tooltip('Weekly', weeklyPercent, weeklyResetsAt, weeklyElapsed, false);
+
+  // Fable (scoped weekly limit) takes the slot under Session, keeping the
+  // percent view one compact column. Weekly only appears on the wider
+  // countdown side, as "Weekly 6% · Sat": it resets at the same hour:minute as
+  // Fable, so the weekday is enough. It also stays visible when capped or in
+  // 'text' mode (no flip there). Square Windows/Linux slots skip Fable.
+  let bottomRow = weeklyRow;
+  const fable = usageData?.seven_day_fable;
+  const fablePercent = fable?.utilization || 0;
+  const fableElapsed = fable ? elapsedInfo(fable.resets_at, 7 * 24 * HOUR_MS) : null;
+  if (stacked && fable) {
+    bottomRow = rowSpec(fablePercent, fableElapsed, FABLE_RING_STOPS, false);
+    if (trayFlip >= 0.5 && weeklyRow.kind === 'ring') {
+      const day = weeklyResetsAt ? new Date(weeklyResetsAt).toLocaleDateString(undefined, { weekday: 'short' }) : '—';
+      weeklyRow.text = `Weekly ${Math.round(weeklyPercent)}% · ${day}`;
+    }
+    if (trayFlip >= 0.5 || weeklyRow.kind !== 'ring') bottomRow.extra = weeklyRow;
+    weeklyTip += `\n${tooltip('Fable', fablePercent, fable.resets_at, fableElapsed, false)}`;
+  }
+
+  // 'text' mode on macOS: plain numbers, each behind a thin ring whose arc
+  // is the usage in that limit's color (red at the danger threshold). Session
+  // on top, Weekly then Fable below. Click flips the text to time remaining;
+  // the rings stay put so it's clear which time is which. Weekly shows only
+  // its reset weekday there, since it resets at the same hour:minute as Fable.
+  let stackedRows = [sessionRow, bottomRow];
+  if (stacked && displayMode === 'text') {
+    const flipped = trayFlip >= 0.5;
+    const cell = (percent, palette, flippedText) => ({
+      kind: 'gauge',
+      fill: percent / 100,
+      color: percent >= dangerThreshold ? { r: 239, g: 68, b: 68 } : palette[0],
+      text: flipped ? flippedText || '—' : `${Math.round(percent)}%`,
+    });
+    const weeklyDay = weeklyResetsAt ? new Date(weeklyResetsAt).toLocaleDateString(undefined, { weekday: 'short' }) : null;
+    const weeklyCell = cell(weeklyPercent, TRAY_TEXT_COLORS.weekly, fable ? weeklyDay : weeklyElapsed?.remainingText);
+    if (fable) weeklyCell.extra = cell(fablePercent, TRAY_TEXT_COLORS.fable, fableElapsed?.remainingText);
+    const sessionCell = cell(sessionPercent, TRAY_TEXT_COLORS.session, sessionElapsed?.remainingText);
+    // Second column on the top row too: Session's countdown, or its reset clock time once flipped.
+    const sessionResetClock = sessionResetsAt
+      ? new Date(sessionResetsAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', hour12: timeFormat === '12h' })
+      : null;
+    sessionCell.extra = { kind: 'text', text: (flipped ? sessionResetClock : sessionElapsed?.remainingText) || '—' };
+    stackedRows = [sessionCell, weeklyCell];
+  }
+
   try {
-    // Generate Weekly icon (blue background) - LEFT position
-    let weeklyIcon;
-    if (weeklyPercent >= 99) {
-      weeklyIcon = generateRedXIcon();
+    if (stacked) {
+      const image = await renderTrayImage(stackedRows, true);
+      if (!sessionTray || sessionTray.isDestroyed()) return;
+      sessionTray.setImage(image);
+      sessionTray.setTitle('');
+      sessionTray.setToolTip(`${sessionTip}\n${weeklyTip}`);
     } else {
-      const weeklyColor = getBackgroundColor(weeklyPercent, false, warnThreshold, dangerThreshold);
-      weeklyIcon = generatePercentageIcon(weeklyPercent, weeklyColor);
-    }
-    if (weeklyTray && !weeklyTray.isDestroyed()) {
-      weeklyTray.setImage(weeklyIcon);
-      let weeklyTooltip = `Weekly: ${Math.round(weeklyPercent)}%`;
-      const weeklyResetTime = formatResetTime(weeklyResetsAt, timeFormat, true);
-      if (weeklyResetTime) {
-        weeklyTooltip += `\nResets: ${weeklyResetTime}`;
+      const [sessionImage, weeklyImage] = await Promise.all([
+        renderTrayImage([sessionRow], false),
+        renderTrayImage([weeklyRow], false),
+      ]);
+      if (sessionTray && !sessionTray.isDestroyed()) {
+        sessionTray.setImage(sessionImage);
+        sessionTray.setToolTip(sessionTip);
       }
-      weeklyTray.setToolTip(weeklyTooltip);
-    }
-    
-    // Generate Session icon (purple background) - RIGHT position
-    let sessionIcon;
-    if (sessionPercent >= 99) {
-      sessionIcon = generateRedXIcon();
-    } else {
-      const sessionColor = getBackgroundColor(sessionPercent, true, warnThreshold, dangerThreshold);
-      sessionIcon = generatePercentageIcon(sessionPercent, sessionColor);
-    }
-    if (sessionTray && !sessionTray.isDestroyed()) {
-      sessionTray.setImage(sessionIcon);
-      let sessionTooltip = `Session: ${Math.round(sessionPercent)}%`;
-      const sessionResetTime = formatResetTime(sessionResetsAt, timeFormat, false);
-      if (sessionResetTime) {
-        sessionTooltip += `\nResets: ${sessionResetTime}`;
+      if (weeklyTray && !weeklyTray.isDestroyed()) {
+        weeklyTray.setImage(weeklyImage);
+        weeklyTray.setToolTip(weeklyTip);
       }
-      sessionTray.setToolTip(sessionTooltip);
     }
   } catch (error) {
     console.error('Failed to update tray icons:', error);
@@ -1152,7 +1142,8 @@ ipcMain.handle('get-settings', () => {
     graphVisible: store.get('settings.graphVisible', false),
     expandedOpen: store.get('settings.expandedOpen', false),
     compactSpendOpen: store.get('settings.compactSpendOpen', false),
-    showTrayStats: store.get('settings.showTrayStats', false)
+    showTrayStats: store.get('settings.showTrayStats', false),
+    trayDisplayMode: store.get('settings.trayDisplayMode', 'both')
   };
 });
 
@@ -1179,6 +1170,9 @@ ipcMain.handle('save-settings', (event, settings) => {
     store.set('settings.compactSpendOpen', settings.compactSpendOpen);
   }
   store.set('settings.showTrayStats', settings.showTrayStats);
+  if (settings.trayDisplayMode) {
+    store.set('settings.trayDisplayMode', settings.trayDisplayMode);
+  }
 
   const isPortable = process.platform === 'win32' && !!process.env.PORTABLE_EXECUTABLE_FILE;
 
@@ -1691,6 +1685,17 @@ app.whenReady().then(async () => {
     }
     mainWindow.setAlwaysOnTop(alwaysOnTop, 'floating');
   }
+
+  // Redraw the tray icons on the same 30s cadence the widget's own ELAPSED
+  // rings use (see startCountdown() in app.js), so the countdown visibly
+  // ticks down between the ~5min network refreshes rather than jumping.
+  // Redraws from the last fetched data only — no network call.
+  setInterval(() => {
+    if (store.get('settings.showTrayStats', false)) {
+      const latestUsageData = store.get('latestUsageData');
+      if (latestUsageData) updateTrayIcon(latestUsageData);
+    }
+  }, 30000);
 
   // Periodic always-on-top re-assertion to recover from z-order disruptions
   // (hidden window spawns, window manager shortcuts, alt-tab, etc.)

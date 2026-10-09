@@ -8,6 +8,7 @@
     "build": "electron-builder",
     "build:win": "electron-builder --win",
     "dev": "cross-env NODE_ENV=development electron .",
+    "test:tray": "electron test-tray-render.js",
     "build:mac": "electron-builder --mac",
     "build:linux": "electron-builder --linux"
   },

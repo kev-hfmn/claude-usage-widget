@@ -15,6 +15,7 @@ let isFetching = false;       // in-flight guard — prevents overlapping fetchU
 const UPDATE_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const WIDGET_HEIGHT_COLLAPSED = 155;
 const WIDGET_ROW_HEIGHT = 30;
+const PINNED_ROW_HEIGHT = 34; // .usage-section height(32) + margin-bottom(2)
 const GRAPH_HEIGHT = 232;
 
 // Elapsed-time ring thresholds (session/weekly/extra-row countdown circles).
@@ -72,6 +73,7 @@ const elements = {
     expandArrow: document.getElementById('expandArrow'),
     expandSection: document.getElementById('expandSection'),
     extraRows: document.getElementById('extraRows'),
+    pinnedRows: document.getElementById('pinnedRows'),
     graphSection: document.getElementById('graphSection'),
     usageChart: document.getElementById('usageChart'),
 
@@ -86,9 +88,11 @@ const elements = {
     minimizeToTrayToggle: document.getElementById('minimizeToTrayToggle'),
     alwaysOnTopToggle: document.getElementById('alwaysOnTopToggle'),
     showTrayStatsToggle: document.getElementById('showTrayStatsToggle'),
+    trayDisplayModeRow: document.getElementById('trayDisplayModeRow'),
+    trayModeBtns: document.querySelectorAll('.tray-mode-btn'),
     warnThreshold: document.getElementById('warnThreshold'),
     dangerThreshold: document.getElementById('dangerThreshold'),
-    themeBtns: document.querySelectorAll('.theme-btn'),
+    themeBtns: document.querySelectorAll('#themeSelector .theme-btn'),
     timeFormat: document.getElementById('timeFormat'),
     weeklyDateFormat: document.getElementById('weeklyDateFormat'),
     refreshInterval: document.getElementById('refreshInterval'),
@@ -355,6 +359,14 @@ function setupEventListeners() {
         });
     });
 
+    // Tray display style buttons (Ring / Text / Both)
+    elements.trayModeBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            elements.trayModeBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        });
+    });
+
     // Prevent accidental app hiding: bidirectional coupling between Hide from Taskbar and Show Tray Stats
     // If user enables "Hide from Taskbar", automatically enable "Show Tray Stats" (ensures tray icon is visible)
     elements.minimizeToTrayToggle.addEventListener('change', () => {
@@ -367,6 +379,9 @@ function setupEventListeners() {
     elements.showTrayStatsToggle.addEventListener('change', () => {
         if (!elements.showTrayStatsToggle.checked && elements.minimizeToTrayToggle.checked) {
             elements.minimizeToTrayToggle.checked = false;
+        }
+        if (elements.trayDisplayModeRow) {
+            elements.trayDisplayModeRow.style.display = elements.showTrayStatsToggle.checked ? '' : 'none';
         }
     });
 
@@ -599,6 +614,12 @@ const EXTRA_ROW_CONFIG = {
     extra_usage: { label: 'Extra Usage', color: 'extra' },
 };
 
+// Keys of scoped weekly limits (kind "weekly_scoped", e.g. Fable) seen in the
+// payload. These rows are pinned into #pinnedRows next to Session/Weekly rather
+// than buried in the collapsed expand panel — a plan-wide weekly cap the user
+// can hit is main-view information. Filled by normalizeUsageData().
+const scopedWeeklyKeys = new Set();
+
 // Expiry warning thresholds for the credits row (days until next_expires_at)
 const CREDIT_EXPIRY_WARN_DAYS = 21;
 const CREDIT_EXPIRY_DANGER_DAYS = 7;
@@ -664,11 +685,12 @@ function buildExtraRows(data) {
     });
     
     // Only rebuild if we have data, otherwise keep existing rows
-    if (!hasAnyExtendedData && elements.extraRows.children.length > 0) {
+    if (!hasAnyExtendedData && (elements.extraRows.children.length > 0 || elements.pinnedRows.children.length > 0)) {
         return; // Keep existing rows
     }
-    
+
     elements.extraRows.innerHTML = '';
+    elements.pinnedRows.innerHTML = '';
     let count = 0;
 
     for (const [key, config] of Object.entries(EXTRA_ROW_CONFIG)) {
@@ -811,6 +833,13 @@ function buildExtraRows(data) {
             row.appendChild(resetsText);
         }
 
+        // Scoped model rows are pinned to the main view; everything else stays
+        // in the expand panel (count drives the expand toggle's visibility).
+        if (scopedWeeklyKeys.has(key)) {
+            elements.pinnedRows.appendChild(row);
+            continue;
+        }
+
         elements.extraRows.appendChild(row);
         count++;
 
@@ -837,7 +866,9 @@ function refreshExtraTimers() {
     // querySelectorAll lists by index breaks as soon as a row has a text but
     // no circle (the extra_usage row), which shifts every later row's circle
     // and leaves those timers stuck at --:--.
-    elements.extraRows.querySelectorAll('.usage-section').forEach((row) => {
+    // Pinned rows are always visible, so their timers refresh regardless of
+    // whether the expand panel is open.
+    document.querySelectorAll('#extraRows .usage-section, #pinnedRows .usage-section').forEach((row) => {
         const textEl = row.querySelector('.timer-text');
         const circleEl = row.querySelector('.timer-progress');
         if (!textEl || !circleEl) return;
@@ -862,7 +893,10 @@ function resizeWidget(bannerVisible) {
         ? EXPAND_OVERHEAD + (extraCount * WIDGET_ROW_HEIGHT)
         : 0;
     const graphOffset = graphVisible ? GRAPH_HEIGHT : 0;
-    const totalHeight = WIDGET_HEIGHT_COLLAPSED + expandedOffset + graphOffset + bannerOffset;
+    // Pinned scoped rows sit in the always-visible area, so they use the main
+    // row height (32px + 2px margin), not the shorter expand-panel row.
+    const pinnedOffset = elements.pinnedRows.children.length * PINNED_ROW_HEIGHT;
+    const totalHeight = WIDGET_HEIGHT_COLLAPSED + pinnedOffset + expandedOffset + graphOffset + bannerOffset;
     window.electronAPI.resizeWindow(totalHeight);
 }
 
@@ -879,6 +913,7 @@ function normalizeUsageData(data) {
         const displayName = limit.scope && limit.scope.model && limit.scope.model.display_name;
         if (!displayName) continue;
         const key = 'seven_day_' + String(displayName).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+        scopedWeeklyKeys.add(key);
         if (EXTRA_ROW_CONFIG[key]) continue; // already known (e.g. seven_day_fable)
         const extraUsage = EXTRA_ROW_CONFIG.extra_usage;
         delete EXTRA_ROW_CONFIG.extra_usage;
@@ -894,7 +929,7 @@ function updateUI(data) {
     showMainContent();
     buildExtraRows(data);
     refreshTimers();
-    if (isExpanded) refreshExtraTimers();
+    refreshExtraTimers();
     if (!isCompactMode) resizeWidget();
     startCountdown();
     if (graphVisible) {
@@ -1269,7 +1304,7 @@ function startCountdown() {
     if (countdownInterval) clearInterval(countdownInterval);
     countdownInterval = setInterval(() => {
         refreshTimers();
-        if (isExpanded) refreshExtraTimers();
+        refreshExtraTimers();
     }, 30000);
 }
 
@@ -1471,7 +1506,8 @@ function renderChart(history) {
 
     const showSonnet = isExpanded && !!latestUsageData?.seven_day_sonnet;
     const showOpus = isExpanded && !!latestUsageData?.seven_day_opus;
-    const showFable = isExpanded && !!latestUsageData?.seven_day_fable;
+    // Fable is a pinned main row, so its series shows whenever the chart does
+    const showFable = !!latestUsageData?.seven_day_fable;
     const showCowork = isExpanded && !!latestUsageData?.seven_day_cowork;
     const showDesign = isExpanded && !!latestUsageData?.seven_day_omelette;
     const showOAuthApps = isExpanded && !!latestUsageData?.seven_day_oauth_apps;
@@ -1769,6 +1805,12 @@ async function loadSettings() {
     elements.minimizeToTrayToggle.checked = settings.minimizeToTray;
     elements.alwaysOnTopToggle.checked = settings.alwaysOnTop;
     elements.showTrayStatsToggle.checked = settings.showTrayStats || false;
+    if (elements.trayDisplayModeRow) {
+        elements.trayDisplayModeRow.style.display = elements.showTrayStatsToggle.checked ? '' : 'none';
+    }
+    elements.trayModeBtns.forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.trayMode === (settings.trayDisplayMode || 'both'));
+    });
     elements.warnThreshold.value = settings.warnThreshold;
     elements.dangerThreshold.value = settings.dangerThreshold;
     elements.timeFormat.value = settings.timeFormat || '12h';
@@ -1796,7 +1838,8 @@ async function loadSettings() {
 }
 
 async function saveSettings() {
-    const activeThemeBtn = document.querySelector('.theme-btn.active');
+    const activeThemeBtn = document.querySelector('#themeSelector .theme-btn.active');
+    const activeTrayModeBtn = document.querySelector('.tray-mode-btn.active');
     const warn = parseInt(elements.warnThreshold.value) || 75;
     const danger = parseInt(elements.dangerThreshold.value) || 90;
 
@@ -1814,6 +1857,7 @@ async function saveSettings() {
         minimizeToTray: elements.minimizeToTrayToggle.checked,
         alwaysOnTop: elements.alwaysOnTopToggle.checked,
         showTrayStats: elements.showTrayStatsToggle.checked,
+        trayDisplayMode: activeTrayModeBtn ? activeTrayModeBtn.dataset.trayMode : 'both',
         theme: activeThemeBtn ? activeThemeBtn.dataset.theme : 'dark',
         warnThreshold: warn,
         dangerThreshold: danger,
@@ -1835,11 +1879,10 @@ async function saveSettings() {
     // Re-render resets-at values immediately with new format
     if (latestUsageData) {
         refreshTimers();
-        // Rebuild extra rows to apply new threshold colors
-        if (isExpanded) {
-            buildExtraRows(latestUsageData);
-            refreshExtraTimers();
-        }
+        // Rebuild extra rows to apply new threshold colors — pinned rows are
+        // visible even when the expand panel is closed, so this isn't gated.
+        buildExtraRows(latestUsageData);
+        refreshExtraTimers();
     }
     // Restart auto-update with new interval if it changed
     startAutoUpdate();
